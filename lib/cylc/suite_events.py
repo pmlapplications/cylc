@@ -21,7 +21,7 @@ from collections import namedtuple
 import os
 from pipes import quote
 
-from cylc.cfgspec.globalcfg import GLOBAL_CFG
+from cylc.cfgspec.glbl_cfg import glbl_cfg
 from cylc.mp_pool import SuiteProcContext
 from cylc.hostuserutil import get_host, get_user
 from cylc.suite_logging import LOG
@@ -57,7 +57,7 @@ class SuiteEventHandler(object):
         """Return a named [cylc][[events]] configuration."""
         for getter in [
                 config.cfg['cylc']['events'],
-                GLOBAL_CFG.get(['cylc', 'events'])]:
+                glbl_cfg().get(['cylc', 'events'])]:
             try:
                 value = getter[key]
             except KeyError:
@@ -111,7 +111,7 @@ class SuiteEventHandler(object):
                 ],
                 env=env,
                 stdin_str=stdin_str)
-            if self.proc_pool.is_closed():
+            if self.proc_pool.closed:
                 # Run command in foreground if process pool is closed
                 self.proc_pool.run_command(proc_ctx)
                 self._run_event_handlers_callback(proc_ctx)
@@ -161,7 +161,7 @@ class SuiteEventHandler(object):
                     handler, ctx.event, ctx.suite, ctx.reason)
             proc_ctx = SuiteProcContext(
                 cmd_key, cmd, env=dict(os.environ), shell=True)
-            if abort_on_error or self.proc_pool.is_closed():
+            if abort_on_error or self.proc_pool.closed:
                 # Run command in foreground if abort on failure is set or if
                 # process pool is closed
                 self.proc_pool.run_command(proc_ctx)

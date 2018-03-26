@@ -31,7 +31,7 @@ import isodatetime.data
 import isodatetime.parsers
 from parsec.util import printcfg
 
-from cylc.cfgspec.globalcfg import GLOBAL_CFG
+from cylc.cfgspec.glbl_cfg import glbl_cfg
 from cylc.config import SuiteConfig
 from cylc.cycling import PointParsingError
 from cylc.cycling.loader import get_point, standardise_point_string
@@ -87,6 +87,7 @@ class Scheduler(object):
 
     # Intervals in seconds
     INTERVAL_MAIN_LOOP = 1.0
+    INTERVAL_MAIN_LOOP_QUICK = 0.5
     INTERVAL_STOP_KILL = 10.0
     INTERVAL_STOP_PROCESS_POOL_EMPTY = 0.5
 
@@ -126,7 +127,7 @@ class Scheduler(object):
         self.suiterc_update_time = None
         # For user-defined batch system handlers
         sys.path.append(os.path.join(self.suite_dir, 'python'))
-        self.suite_run_dir = GLOBAL_CFG.get_derived_host_item(
+        self.suite_run_dir = glbl_cfg().get_derived_host_item(
             self.suite, 'suite run directory')
         self.config = None
 
@@ -210,7 +211,7 @@ class Scheduler(object):
         """Start the server."""
         self._start_print_blurb()
 
-        GLOBAL_CFG.create_cylc_run_tree(self.suite)
+        glbl_cfg().create_cylc_run_tree(self.suite)
 
         if self.is_restart:
             self.suite_db_mgr.restart_upgrade()
@@ -224,7 +225,6 @@ class Scheduler(object):
             # Setup the suite log.
             SuiteLog.get_inst(self.suite).pimp(detach)
 
-            self.proc_pool = SuiteProcPool()
             self.configure_comms_daemon()
             self.configure()
             self.profiler.start()
@@ -299,6 +299,7 @@ conditions; see `cylc conditions`.
         self.profiler.log_memory("scheduler.py: start configure")
 
         # Start up essential services
+        self.proc_pool = SuiteProcPool()
         self.suite_log = SuiteLog.get_inst(self.suite)
         self.state_summary_mgr = StateSummaryMgr()
         self.command_queue = Queue()
@@ -379,6 +380,8 @@ conditions; see `cylc conditions`.
 
         self.suite_db_mgr.put_suite_params(
             self.run_mode,
+            CYLC_VERSION,
+            str(cylc.flags.utc),
             self.initial_point,
             self.final_point,
             self.pool.is_held,
@@ -464,7 +467,7 @@ conditions; see `cylc conditions`.
             if auths:
                 sleep(1.0)
                 # Remote init is done via process pool
-                self.proc_pool.handle_results_async()
+                self.proc_pool.process()
         self.command_poll_tasks()
 
     def _load_suite_params(self, row_idx, row):
@@ -624,8 +627,7 @@ conditions; see `cylc conditions`.
 
     def info_get_suite_info(self):
         """Return a dict containing the suite title and description."""
-        return {'title': self.config.cfg['meta']['title'],
-                'description': self.config.cfg['meta']['description']}
+        return self.config.cfg['meta']
 
     def info_get_suite_state_summary(self):
         """Return the global, task, and family summary data structures."""
@@ -755,7 +757,7 @@ conditions; see `cylc conditions`.
 
     def _set_stop(self, stop_mode=None):
         """Set shutdown mode."""
-        self.proc_pool.stop_job_submission()
+        self.proc_pool.set_stopping()
         if stop_mode is None:
             stop_mode = TaskPool.STOP_REQUEST_CLEAN
         self.stop_mode = stop_mode
@@ -884,6 +886,8 @@ conditions; see `cylc conditions`.
             self.configure_reftest(recon=True)
         self.suite_db_mgr.put_suite_params(
             self.run_mode,
+            CYLC_VERSION,
+            str(cylc.flags.utc),
             self.initial_point,
             self.final_point,
             self.pool.is_held,
@@ -947,14 +951,14 @@ conditions; see `cylc conditions`.
             mgr.KEY_PORT: str(self.port),
             mgr.KEY_OWNER: self.owner,
             mgr.KEY_SUITE_RUN_DIR_ON_SUITE_HOST: self.suite_run_dir,
-            mgr.KEY_TASK_MSG_MAX_TRIES: str(GLOBAL_CFG.get(
+            mgr.KEY_TASK_MSG_MAX_TRIES: str(glbl_cfg().get(
                 ['task messaging', 'maximum number of tries'])),
-            mgr.KEY_TASK_MSG_RETRY_INTVL: str(float(GLOBAL_CFG.get(
+            mgr.KEY_TASK_MSG_RETRY_INTVL: str(float(glbl_cfg().get(
                 ['task messaging', 'retry interval']))),
-            mgr.KEY_TASK_MSG_TIMEOUT: str(float(GLOBAL_CFG.get(
+            mgr.KEY_TASK_MSG_TIMEOUT: str(float(glbl_cfg().get(
                 ['task messaging', 'connection timeout']))),
             mgr.KEY_VERSION: CYLC_VERSION,
-            mgr.KEY_COMMS_PROTOCOL: GLOBAL_CFG.get(
+            mgr.KEY_COMMS_PROTOCOL: glbl_cfg().get(
                 ['communication', 'method'])}
         try:
             mgr.dump_contact_file(self.suite, contact_data)
@@ -981,7 +985,7 @@ conditions; see `cylc conditions`.
         )
         self.suiterc_update_time = time()
         # Dump the loaded suiterc for future reference.
-        cfg_logdir = GLOBAL_CFG.get_derived_host_item(
+        cfg_logdir = glbl_cfg().get_derived_host_item(
             self.suite, 'suite config log directory')
         time_str = get_current_time_string(
             override_use_utc=True, use_basic_format=True,
@@ -1050,8 +1054,8 @@ conditions; see `cylc conditions`.
         # Pass static cylc and suite variables to job script generation code
         self.task_job_mgr.job_file_writer.set_suite_env({
             'CYLC_UTC': str(cylc.flags.utc),
-            'CYLC_DEBUG': str(cylc.flags.debug),
-            'CYLC_VERBOSE': str(cylc.flags.verbose),
+            'CYLC_DEBUG': str(cylc.flags.debug).lower(),
+            'CYLC_VERBOSE': str(cylc.flags.verbose).lower(),
             'CYLC_SUITE_NAME': self.suite,
             'CYLC_CYCLING_MODE': str(cylc.flags.cycling_mode),
             'CYLC_SUITE_INITIAL_CYCLE_POINT': str(self.initial_point),
@@ -1068,9 +1072,9 @@ conditions; see `cylc conditions`.
         for var, val in [
                 ('CYLC_SUITE_RUN_DIR', self.suite_run_dir),
                 ('CYLC_SUITE_LOG_DIR', self.suite_log.get_dir()),
-                ('CYLC_SUITE_WORK_DIR', GLOBAL_CFG.get_derived_host_item(
+                ('CYLC_SUITE_WORK_DIR', glbl_cfg().get_derived_host_item(
                     self.suite, 'suite work directory')),
-                ('CYLC_SUITE_SHARE_DIR', GLOBAL_CFG.get_derived_host_item(
+                ('CYLC_SUITE_SHARE_DIR', glbl_cfg().get_derived_host_item(
                     self.suite, 'suite share directory')),
                 ('CYLC_SUITE_DEF_PATH', self.suite_dir)]:
             os.environ[var] = val
@@ -1267,12 +1271,12 @@ conditions; see `cylc conditions`.
                 stop_process_pool_empty_msg = (
                     "Waiting for the command process pool to empty" +
                     " for shutdown")
-                while not self.proc_pool.is_dead():
+                while self.proc_pool.is_not_done():
                     sleep(self.INTERVAL_STOP_PROCESS_POOL_EMPTY)
                     if stop_process_pool_empty_msg:
                         LOG.info(stop_process_pool_empty_msg)
                         stop_process_pool_empty_msg = None
-                    self.proc_pool.handle_results_async()
+                    self.proc_pool.process()
                     self.process_command_queue()
             if self.options.profile_mode:
                 self.profiler.log_memory(
@@ -1347,7 +1351,7 @@ conditions; see `cylc conditions`.
             if self.pool.release_runahead_tasks():
                 cylc.flags.iflag = True
                 self.task_events_mgr.pflag = True
-            self.proc_pool.handle_results_async()
+            self.proc_pool.process()
 
             # PROCESS ALL TASKS whenever something has changed that might
             # require renegotiation of dependencies, etc.
@@ -1382,7 +1386,21 @@ conditions; see `cylc conditions`.
             if self.options.profile_mode:
                 self.update_profiler_logs(tinit)
 
-            sleep(self.INTERVAL_MAIN_LOOP)
+            # Sleep a bit for things to catch up.
+            # Quick sleep if there are items pending in process pool.
+            # (Should probably use quick sleep logic for other queues?)
+            elapsed = time() - tinit
+            quick_mode = self.proc_pool.is_not_done()
+            if (elapsed >= self.INTERVAL_MAIN_LOOP or
+                    quick_mode and elapsed >= self.INTERVAL_MAIN_LOOP_QUICK):
+                # Main loop has taken quite a bit to get through
+                # Still yield control to other threads by sleep(0.0)
+                sleep(0.0)
+            elif quick_mode:
+                sleep(self.INTERVAL_MAIN_LOOP_QUICK - elapsed)
+            else:
+                sleep(self.INTERVAL_MAIN_LOOP - elapsed)
+            # Record latest main loop interval
             self.main_loop_intervals.append(time() - tinit)
             # END MAIN LOOP
 
@@ -1504,11 +1522,10 @@ conditions; see `cylc conditions`.
                 ERR.error(str(exc))
 
         if self.proc_pool:
-            if not self.proc_pool.is_dead():
+            if self.proc_pool.is_not_done():
                 # e.g. KeyboardInterrupt
                 self.proc_pool.terminate()
-            self.proc_pool.join()
-            self.proc_pool.handle_results_async()
+            self.proc_pool.process()
 
         if self.pool is not None:
             self.pool.warn_stop_orphans()
@@ -1610,18 +1627,24 @@ conditions; see `cylc conditions`.
         """Trigger tasks."""
         return self.pool.trigger_tasks(items, back_out)
 
-    def command_dry_run_tasks(self, items):
+    def command_dry_run_tasks(self, items, check_syntax=True):
         """Dry-run tasks, e.g. edit run."""
         itasks, bad_items = self.pool.filter_task_proxies(items)
         n_warnings = len(bad_items)
         if len(itasks) > 1:
             LOG.warning("Unique task match not found: %s" % items)
             return n_warnings + 1
-        if self.task_job_mgr.prep_submit_task_jobs(
-                self.suite, [itasks[0]], dry_run=True)[0]:
-            return n_warnings
-        else:
-            return n_warnings + 1
+        while self.stop_mode is None:
+            prep_tasks, bad_tasks = self.task_job_mgr.prep_submit_task_jobs(
+                self.suite, [itasks[0]], dry_run=True,
+                check_syntax=check_syntax)
+            if itasks[0] in prep_tasks:
+                return n_warnings
+            elif itasks[0] in bad_tasks:
+                return n_warnings + 1
+            else:
+                self.proc_pool.process()
+                sleep(self.INTERVAL_MAIN_LOOP_QUICK)
 
     def command_reset_task_states(self, items, state=None, outputs=None):
         """Reset the state of tasks."""
@@ -1706,7 +1729,7 @@ conditions; see `cylc conditions`.
 
     def _get_cylc_conf(self, key, default=None):
         """Return a named setting under [cylc] from suite.rc or global.rc."""
-        for getter in [self.config.cfg['cylc'], GLOBAL_CFG.get(['cylc'])]:
+        for getter in [self.config.cfg['cylc'], glbl_cfg().get(['cylc'])]:
             try:
                 value = getter[key]
             except KeyError:
